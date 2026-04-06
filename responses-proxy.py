@@ -115,48 +115,50 @@ def create_app(upstream: str, log_path: Path) -> FastAPI:
 
         async def _stream() -> AsyncIterator[bytes]:
             buf = ""
-            completed_seen = False
+            usage_data_seen = False
             async with client.stream("POST", url, content=body, headers=fwd_headers) as resp:
                 async for chunk in resp.aiter_bytes():
                     # Feed decoded text into the SSE parser.
                     buf += chunk.decode("utf-8", errors="replace")
                     events, buf = _parse_sse_events(buf)
                     for ev in events:
-                        if ev["event"] == "response.completed":
-                            completed_seen = True
-                            try:
-                                payload = json.loads(ev["data"])
-                                usage = _extract_usage(payload)
-                                if usage:
-                                    usage["timestamp"] = datetime.now(
-                                        timezone.utc
-                                    ).isoformat()
-                                    _append_usage(log_path, usage)
-                                    logger.info(
-                                        "response_id=%s model=%s "
-                                        "input=%d cached=%d output=%d "
-                                        "reasoning=%d total=%d",
-                                        usage["response_id"],
-                                        usage["model"],
-                                        usage["input_tokens"],
-                                        usage["cached_tokens"],
-                                        usage["output_tokens"],
-                                        usage["reasoning_tokens"],
-                                        usage["total_tokens"],
-                                    )
-                            except (json.JSONDecodeError, KeyError):
-                                logger.warning(
-                                    "Failed to parse response.completed event"
+                        if ev["data"] == "[DONE]":
+                            continue
+                        try:
+                            payload = json.loads(ev["data"])
+                            usage = _extract_usage(payload)
+                            if usage:
+                                usage["timestamp"] = datetime.now(
+                                    timezone.utc
+                                ).isoformat()
+                                _append_usage(log_path, usage)
+                                usage_data_seen = True
+                                logger.info(
+                                    "response_id=%s model=%s "
+                                    "input=%d cached=%d output=%d "
+                                    "reasoning=%d total=%d",
+                                    usage["response_id"],
+                                    usage["model"],
+                                    usage["input_tokens"],
+                                    usage["cached_tokens"],
+                                    usage["output_tokens"],
+                                    usage["reasoning_tokens"],
+                                    usage["total_tokens"],
                                 )
+                        except (json.JSONDecodeError, KeyError):
+                            breakpoint()
+                            logger.warning(
+                                "Failed to parse response data"
+                            )
                     yield chunk
-                # After stream ends, log a warning if no completed event.
-                if not completed_seen:
+                # After stream ends, log a warning if no token usage data.
+                if not usage_data_seen:
                     entry = {
                         "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "warning": "stream ended without response.completed",
+                        "warning": "stream ended without usage data",
                     }
                     _append_usage(log_path, entry)
-                    logger.warning("Stream ended without response.completed")
+                    logger.warning("Stream ended without usage data")
 
         return StreamingResponse(
             _stream(),
